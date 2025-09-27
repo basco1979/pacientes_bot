@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    raise SystemExit("Falta BOT_TOKEN en .env")
+    raise SystemExit("Falta el BOT_TOKEN en .env")
 
 # --- DB ---
 conn = sqlite3.connect("pacientes.db", check_same_thread=False)

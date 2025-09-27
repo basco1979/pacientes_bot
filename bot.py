@@ -1,23 +1,16 @@
 import os
-import logging
 import sqlite3
 from datetime import datetime
-from dotenv import load_dotenv
-
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import (
+    Update, ReplyKeyboardMarkup,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    ConversationHandler, MessageHandler, filters, ContextTypes
+    Application, CommandHandler, MessageHandler, filters,
+    ContextTypes, CallbackQueryHandler, ConversationHandler
 )
 
-# --- Config ---
-logging.basicConfig(level=logging.INFO)
-load_dotenv()
-TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
-    raise SystemExit("Falta el BOT_TOKEN en .env")
-
-# --- DB ---
+# ------------------ CONFIGURACIÓN DE BASE DE DATOS ------------------
 conn = sqlite3.connect("pacientes.db", check_same_thread=False)
 c = conn.cursor()
 c.execute("""
@@ -26,138 +19,166 @@ CREATE TABLE IF NOT EXISTS sesiones (
     nombre TEXT,
     tipo TEXT,
     pago INTEGER,
+    monto REAL DEFAULT 0,
     fecha TEXT
 )
 """)
 conn.commit()
 
-# --- Estados ---
-NOMBRE, TIPO, PAGO = range(3)
+# Intentar agregar columna "monto" si no existe
+try:
+    c.execute("ALTER TABLE sesiones ADD COLUMN monto REAL DEFAULT 0")
+    conn.commit()
+except sqlite3.OperationalError:
+    pass  # ya existe
 
-# --- Handlers ---
+# ------------------ MENÚ PRINCIPAL ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("➕ Registrar sesión", callback_data="registrar")],
-        [InlineKeyboardButton("📋 Listar últimos", callback_data="listar")],
-        [InlineKeyboardButton("📊 Reporte mensual", callback_data="reporte_mes")]
+        ["➕ Nueva sesión"],
+        ["📋 Ver impagos"],
+        ["📊 Reporte mensual"]
     ]
-    await update.message.reply_text("Hola! ¿Qué querés hacer?", reply_markup=InlineKeyboardMarkup(keyboard))
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("Bienvenido al registro de pacientes 🧑‍⚕️", reply_markup=reply_markup)
 
-# menú general (botones)
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ------------------ REGISTRO DE SESIONES ------------------
+async def nueva_sesion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Escribí: Nombre, Tipo, Pago(Si/No) o Monto (ej: Juan Perez, Particular, 2000)")
+
+async def guardar_sesion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        partes = [x.strip() for x in update.message.text.split(",")]
+        if len(partes) != 3:
+            raise ValueError("Formato incorrecto")
+        nombre, tipo, valor = partes
+
+        if valor.replace(".", "").isdigit():
+            monto = float(valor)
+            pago = 1 if monto > 0 else 0
+        else:
+            pago = 1 if valor.lower() in ["si", "sí"] else 0
+            monto = 0
+
+        fecha = datetime.now().strftime("%Y-%m-%d")
+        c.execute("INSERT INTO sesiones (nombre, tipo, pago, monto, fecha) VALUES (?, ?, ?, ?, ?)",
+                  (nombre, tipo, pago, monto, fecha))
+        conn.commit()
+
+        await update.message.reply_text(
+            f"✅ Sesión guardada:\n{nombre} | {tipo} | {'Pagó' if pago else 'Impago'} | Monto: ${monto} | {fecha}"
+        )
+    except Exception as e:
+        await update.message.reply_text("❌ Error. Usá el formato: Nombre, Tipo, Pago(Si/No) o Monto")
+        print(e)
+
+# ------------------ LISTAR IMPAGOS ------------------
+async def listar_impagos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c.execute("SELECT id, nombre, tipo, fecha FROM sesiones WHERE pago = 0 ORDER BY fecha DESC")
+    rows = c.fetchall()
+    if not rows:
+        await update.message.reply_text("No hay sesiones impagas. ✅")
+        return
+
+    for r in rows:
+        id_, nombre, tipo, fecha = r
+        texto = f"ID:{id_} | {nombre} | {tipo} | {fecha} | ❌ Impago"
+        keyboard = [[InlineKeyboardButton("💵 Marcar pagado", callback_data=f"marcar_{id_}")]]
+        await update.message.reply_text(texto, reply_markup=InlineKeyboardMarkup(keyboard))
+
+# ------------------ CALLBACKS PARA PAGOS ------------------
+# Estados para ConversationHandler
+ESPERANDO_MONTO = 1
+
+async def marcar_pago_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == "registrar":
-        await query.message.reply_text("📌 Escribí el *nombre del paciente*:", parse_mode="Markdown")
-        return NOMBRE
-    if query.data == "listar":
-        c.execute("SELECT nombre, tipo, pago, fecha FROM sesiones ORDER BY fecha DESC LIMIT 10")
-        rows = c.fetchall()
-        texto = "\n".join([f"{r[0]} | {r[1]} | {'✅' if r[2] else '❌'} | {r[3]}" for r in rows]) or "No hay registros."
-        await query.edit_message_text(texto)
+    data = query.data
+
+    if data.startswith("marcar_"):
+        id_int = int(data.split("_")[1])
+        context.user_data["id_a_marcar"] = id_int
+        await query.message.reply_text("💰 ¿Cuánto pagó el paciente?")
+        return ESPERANDO_MONTO
+
+    elif data.startswith("desmarcar_"):
+        id_int = int(data.split("_")[1])
+        c.execute("UPDATE sesiones SET pago = 0, monto = 0 WHERE id = ?", (id_int,))
+        conn.commit()
+        c.execute("SELECT nombre, tipo, fecha FROM sesiones WHERE id = ?", (id_int,))
+        row = c.fetchone()
+        if row:
+            nombre, tipo, fecha = row
+            keyboard = [[InlineKeyboardButton("💵 Marcar pagado", callback_data=f"marcar_{id_int}")]]
+            await query.edit_message_text(f"❌ Impago:\nID:{id_int} | {nombre} | {tipo} | {fecha}",
+                                          reply_markup=InlineKeyboardMarkup(keyboard))
         return ConversationHandler.END
-    if query.data == "reporte_mes":
-        await query.message.reply_text("Usá: /reporte YYYY-MM (ej: /reporte 2025-09)")
-        return ConversationHandler.END
 
-# Nombre (texto)
-async def get_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["nombre"] = update.message.text.strip()
-    keyboard = [
-        [InlineKeyboardButton("👤 Particular", callback_data="particular")],
-        [InlineKeyboardButton("🏥 Obra Social", callback_data="obra_social")]
-    ]
-    await update.message.reply_text("Seleccioná el tipo de paciente:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return TIPO
+async def guardar_monto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        monto = float(update.message.text.strip())
+        id_int = context.user_data.get("id_a_marcar")
 
-# Tipo (botón)
-async def get_tipo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["tipo"] = query.data
-    keyboard = [
-        [InlineKeyboardButton("💵 Pagó", callback_data="si")],
-        [InlineKeyboardButton("❌ No pagó", callback_data="no")]
-    ]
-    await query.edit_message_text("¿El paciente pagó?", reply_markup=InlineKeyboardMarkup(keyboard))
-    return PAGO
+        c.execute("UPDATE sesiones SET pago = 1, monto = ? WHERE id = ?", (monto, id_int))
+        conn.commit()
 
-# Pago (botón) -> guardar
-async def get_pago(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    pago_val = 1 if query.data == "si" else 0
-    nombre = context.user_data.get("nombre", "Sin nombre")
-    tipo = context.user_data.get("tipo", "desconocido")
-    fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    c.execute("INSERT INTO sesiones (nombre, tipo, pago, fecha) VALUES (?, ?, ?, ?)",
-              (nombre, tipo, pago_val, fecha))
-    conn.commit()
-
-    await query.edit_message_text(f"✅ Sesión registrada:\n\n👤 {nombre}\n📂 {tipo}\n💰 {'Pagó' if pago_val else 'No pagó'}\n🗓️ {fecha}")
+        c.execute("SELECT nombre, tipo, fecha FROM sesiones WHERE id = ?", (id_int,))
+        row = c.fetchone()
+        if row:
+            nombre, tipo, fecha = row
+            keyboard = [[InlineKeyboardButton("↩️ Desmarcar", callback_data=f"desmarcar_{id_int}")]]
+            await update.message.reply_text(
+                f"✅ Pagado:\nID:{id_int} | {nombre} | {tipo} | ${monto} | {fecha}",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+    except Exception:
+        await update.message.reply_text("❌ Error: escribí un número válido.")
     return ConversationHandler.END
 
-# Cancelar
-async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Registro cancelado.")
-    return ConversationHandler.END
-
-# Buscar por nombre (comando opcional)
-async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Uso: /buscar NombrePaciente")
-        return
-    nombre = " ".join(context.args)
-    c.execute("SELECT nombre, tipo, pago, fecha FROM sesiones WHERE nombre LIKE ? ORDER BY fecha DESC", (f"%{nombre}%",))
-    rows = c.fetchall()
-    texto = "\n".join([f"{r[0]} | {r[1]} | {'✅' if r[2] else '❌'} | {r[3]}" for r in rows]) or "No se encontraron registros."
-    await update.message.reply_text(texto)
-
-# Filtrar mes / reporte
-async def mes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Uso: /mes YYYY-MM")
-        return
-    periodo = context.args[0]
-    c.execute("SELECT nombre, tipo, pago, fecha FROM sesiones WHERE strftime('%Y-%m', fecha) = ?", (periodo,))
-    rows = c.fetchall()
-    texto = "\n".join([f"{r[0]} | {r[1]} | {'✅' if r[2] else '❌'} | {r[3]}" for r in rows]) or "No hay registros en ese mes."
-    await update.message.reply_text(texto)
-
-async def reporte(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Uso: /reporte YYYY-MM")
-        return
-    periodo = context.args[0]
-    c.execute("SELECT COUNT(*), SUM(pago) FROM sesiones WHERE strftime('%Y-%m', fecha) = ?", (periodo,))
-    total, pagados = c.fetchone()
-    pagados = pagados or 0
-    await update.message.reply_text(f"📊 Reporte {periodo}\nTotal sesiones: {total}\nPagadas: {pagados}\nImpagas: {total - pagados}")
-
-# --- Main ---
-def main():
-    app = Application.builder().token(TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(menu, pattern="^registrar$")],
-        states={
-            NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_nombre)],
-            TIPO: [CallbackQueryHandler(get_tipo, pattern="^(particular|obra_social)$")],
-            PAGO: [CallbackQueryHandler(get_pago, pattern="^(si|no)$")],
-        },
-        fallbacks=[CommandHandler("cancelar", cancelar)],
-        per_user=True
+# ------------------ REPORTE MENSUAL ------------------
+async def reporte_mensual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mes = datetime.now().strftime("%Y-%m")
+    c.execute("SELECT COUNT(*) FROM sesiones WHERE fecha LIKE ?", (f"{mes}%",))
+    total = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM sesiones WHERE fecha LIKE ? AND pago = 1", (f"{mes}%",))
+    pagados = c.fetchone()[0]
+    c.execute("SELECT SUM(monto) FROM sesiones WHERE fecha LIKE ?", (f"{mes}%",))
+    total_facturado = c.fetchone()[0] or 0
+    await update.message.reply_text(
+        f"📊 Reporte {mes}:\n"
+        f"Total sesiones: {total}\n"
+        f"Pagadas: {pagados}\n"
+        f"Impagas: {total - pagados}\n"
+        f"Facturación: ${total_facturado:,.0f}"
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(menu, pattern="^(listar|reporte_mes)$"))
-    app.add_handler(conv)
-    app.add_handler(CommandHandler("buscar", buscar))
-    app.add_handler(CommandHandler("mes", mes))
-    app.add_handler(CommandHandler("reporte", reporte))
+# ------------------ MAIN ------------------
+def main():
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    print("Bot corriendo... Ctrl+C para salir")
+    # Comandos
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("impagos", listar_impagos))
+    app.add_handler(CommandHandler("reporte", reporte_mensual))
+
+    # Botones / textos del menú
+    app.add_handler(MessageHandler(filters.Regex("^➕ Nueva sesión$"), nueva_sesion))
+    app.add_handler(MessageHandler(filters.Regex("^📋 Ver impagos$"), listar_impagos))
+    app.add_handler(MessageHandler(filters.Regex("^📊 Reporte mensual$"), reporte_mensual))
+
+    # Guardar sesión si el mensaje es en formato correcto
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guardar_sesion))
+
+    # ConversationHandler para manejar "Marcar pagado" → ingresar monto
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(marcar_pago_callback, pattern="^(marcar_|desmarcar_)")],
+        states={ESPERANDO_MONTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, guardar_monto)]},
+        fallbacks=[]
+    )
+    app.add_handler(conv_handler)
+
+    print("🤖 Bot en marcha con monto...")
     app.run_polling()
 
 if __name__ == "__main__":

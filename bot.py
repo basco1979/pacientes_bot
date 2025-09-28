@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import (
     Update, ReplyKeyboardMarkup,
     InlineKeyboardMarkup, InlineKeyboardButton
@@ -37,7 +37,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         ["➕ Nueva sesión"],
         ["📋 Ver impagos"],
-        ["📊 Reporte mensual"]
+        ["📊 Reporte mensual"],
+        ["📆 Reporte semanal"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Bienvenido al registro de pacientes 🧑‍⚕️", reply_markup=reply_markup)
@@ -87,7 +88,6 @@ async def listar_impagos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(texto, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ------------------ CALLBACKS PARA PAGOS ------------------
-# Estados para ConversationHandler
 ESPERANDO_MONTO = 1
 
 async def marcar_pago_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,6 +152,32 @@ async def reporte_mensual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Facturación: ${total_facturado:,.0f}"
     )
 
+# ------------------ REPORTE SEMANAL ------------------
+async def reporte_semanal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    hoy = datetime.now()
+    lunes = hoy - timedelta(days=hoy.weekday())  # lunes de esta semana
+    domingo = lunes + timedelta(days=6)
+
+    inicio = lunes.strftime("%Y-%m-%d")
+    fin = domingo.strftime("%Y-%m-%d")
+
+    c.execute("SELECT COUNT(*) FROM sesiones WHERE fecha BETWEEN ? AND ?", (inicio, fin))
+    total = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM sesiones WHERE fecha BETWEEN ? AND ? AND pago = 1", (inicio, fin))
+    pagados = c.fetchone()[0]
+    c.execute("SELECT SUM(monto) FROM sesiones WHERE fecha BETWEEN ? AND ?", (inicio, fin))
+    total_facturado = c.fetchone()[0] or 0
+    comision = total_facturado * 0.20
+
+    await update.message.reply_text(
+        f"📆 Reporte semanal ({inicio} → {fin}):\n"
+        f"Total sesiones: {total}\n"
+        f"Pagadas: {pagados}\n"
+        f"Impagas: {total - pagados}\n"
+        f"Facturación: ${total_facturado:,.0f}\n"
+        f"20% comisión: ${comision:,.0f}"
+    )
+
 # ------------------ MAIN ------------------
 def main():
     BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -161,16 +187,15 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("impagos", listar_impagos))
     app.add_handler(CommandHandler("reporte", reporte_mensual))
+    app.add_handler(CommandHandler("reporte_semana", reporte_semanal))
 
     # Botones / textos del menú
     app.add_handler(MessageHandler(filters.Regex("^➕ Nueva sesión$"), nueva_sesion))
     app.add_handler(MessageHandler(filters.Regex("^📋 Ver impagos$"), listar_impagos))
     app.add_handler(MessageHandler(filters.Regex("^📊 Reporte mensual$"), reporte_mensual))
+    app.add_handler(MessageHandler(filters.Regex("^📆 Reporte semanal$"), reporte_semanal))
 
-    # Guardar sesión si el mensaje es en formato correcto
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guardar_sesion))
-
-    # ConversationHandler para manejar "Marcar pagado" → ingresar monto
+    # ConversationHandler primero (para interceptar monto antes de guardar_sesion)
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(marcar_pago_callback, pattern="^(marcar_|desmarcar_)")],
         states={ESPERANDO_MONTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, guardar_monto)]},
@@ -178,7 +203,10 @@ def main():
     )
     app.add_handler(conv_handler)
 
-    print("🤖 Bot en marcha con monto...")
+    # Guardar sesión si el mensaje es en formato correcto
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guardar_sesion))
+
+    print("🤖 Bot en marcha con reportes mensual y semanal...")
     app.run_polling()
 
 if __name__ == "__main__":

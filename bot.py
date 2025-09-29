@@ -18,7 +18,7 @@ DB_CONFIG = {
     "port": "5432"
 }
 
-conn = psycopg2.connect("postgres://postgres.kjguldjmpiehomkehvcv:Gs5Qfy57fU2GAqCt@aws-1-sa-east-1.pooler.supabase.com:6543/postgres?sslmode=require&supa=base-pooler.x")
+conn = psycopg2.connect("postgres://postgres.kjguldjmpiehomkehvcv:Gs5Qfy57fU2GAqCt@aws-1-sa-east-1.pooler.supabase.com:5432/postgres?sslmode=require")
 c = conn.cursor()
 
 # Crear tablas si no existen

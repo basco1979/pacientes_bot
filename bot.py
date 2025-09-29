@@ -1,21 +1,24 @@
+import os
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ConversationHandler, ContextTypes
-from datetime import timedelta
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters,
+    CallbackQueryHandler, ConversationHandler, ContextTypes
+)
 
 # -------------------------------
-# CONFIGURACIÓN DE BASE DE DATOS
+# CONFIGURACIÓN DE SUPABASE
 # -------------------------------
 DB_CONFIG = {
-    "dbname": "TU_DB",
-    "user": "TU_USER",
-    "password": "TU_PASSWORD",
-    "host": "TU_HOST",
+    "dbname": "postgres",                 # suele ser "postgres"
+    "user": "postgres",                   # usuario
+    "password": "Gs5Qfy57fU2GAqCt",   # contraseña que definiste
+    "host": "db.kjguldjmpiehomkehvcv.supabase.co",           # ej: db.abcd1234.supabase.co
     "port": "5432"
 }
 
-conn = psycopg2.connect(**DB_CONFIG)
+conn = psycopg2.connect(**DB_CONFIG, sslmode="require")
 c = conn.cursor()
 
 # Crear tablas si no existen
@@ -171,7 +174,8 @@ async def reporte_semanal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def main():
-    app = Application.builder().token("AQUI_TU_TOKEN").build()
+    BOT_TOKEN = os.getenv("BOT_TOKEN") 
+    app = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(marcar_pago_callback, pattern="^marcar_")],
@@ -189,8 +193,9 @@ def main():
     app.add_handler(CommandHandler("reporte_semana", reporte_semanal))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guardar_sesion))
 
-    print("🤖 Bot en marcha con PostgreSQL...")
+    print("🤖 Bot conectado a Supabase...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+
